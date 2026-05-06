@@ -167,4 +167,36 @@ class UnitController extends BaseController
             'history' => $history,
         ]);
     }
+
+    // API — set titik awal unit
+public function setStartPoint($id)
+{
+    $unit = $this->unitModel->find($id);
+    if (!$unit) {
+        return $this->response->setJSON([
+            'status'  => 'error',
+            'message' => 'Unit tidak ditemukan.',
+        ]);
+    }
+
+    // Hapus histori lama unit ini
+    $this->historyModel->where('unit_id', $id)->delete();
+
+    // Simpan posisi saat ini sebagai titik awal
+    $this->historyModel->insert([
+        'unit_id'   => $id,
+        'pos_x'     => $unit['pos_x'],
+        'pos_y'     => $unit['pos_y'],
+        'moved_by'  => session()->get('user_id'),
+        'timestamp' => date('Y-m-d H:i:s'),
+    ]);
+
+    // Tandai unit sudah punya titik awal
+    $this->unitModel->update($id, ['has_start_point' => 1]);
+
+    return $this->response->setJSON([
+        'status'  => 'ok',
+        'message' => 'Titik awal berhasil disimpan!',
+    ]);
+}
 }

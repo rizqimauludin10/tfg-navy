@@ -102,7 +102,7 @@
 <div class="canvas-wrap" id="canvasWrap">
 
     <div class="fs-badge" id="fsBadge">FULLSCREEN MAP MODE</div>
-    <div class="map-badge" id="mapBadge" style="display:none;"></div>
+    <div class="map-badge" id="mapBadge" style="display:none; color:#00cfff;"></div>
 
     <!-- No map placeholder -->
     <div class="no-map" id="noMap">
@@ -142,10 +142,20 @@
             <span class="popup-key">Update</span>
             <span class="popup-val" id="popupTime">—</span>
         </div>
+        <div style="margin-top:6px;">
+            <span style="font-size:10px;" id="popupStartLabel">—</span>
+        </div>
         <?php if (in_array(session()->get('role'), ['admin','superadmin'])): ?>
         <div class="popup-actions">
             <div class="popup-btn popup-btn-edit" id="popupBtnEdit">Edit</div>
             <div class="popup-btn popup-btn-del" id="popupBtnDel">Hapus</div>
+        </div>
+        <div style="margin-top:6px;">
+            <div class="popup-btn" id="popupBtnStart" style="background:#22c55e15;color:#22c55e;border:0.5px solid #22c55e44;
+              text-align:center;padding:5px 0;border-radius:4px;cursor:pointer;
+              font-size:10px;">
+                <i class="fa fa-flag" style="font-size:9px;"></i> Set Titik Awal
+            </div>
         </div>
         <?php endif; ?>
     </div>
@@ -167,6 +177,15 @@
               display:flex;align-items:center;gap:5px;white-space:nowrap;">
             <i class="fa fa-route" style="font-size:10px;"></i> Trail
         </div>
+    </div>
+
+    <!-- Pan hint -->
+    <div style="position:absolute;top:10px;right:16px;z-index:10;
+            background:#0d1525cc;border:0.5px solid #1e2d4a;
+            border-radius:6px;padding:4px 10px;font-size:10px;
+            color:#00cfff;display:flex;align-items:center;gap:5px;">
+        <i class="fa fa-hand" style="font-size:10px;"></i>
+        Alt + Drag untuk geser peta
     </div>
 
     <?php if (session()->get('role') === 'superadmin'): ?>
@@ -213,14 +232,69 @@ function initCanvas() {
         preserveObjectStacking: true,
     });
 
+    // ── Pan variables ──
+    let isPanning = false;
+    let lastPanX = 0;
+    let lastPanY = 0;
+
+    // ── Mouse Down — mulai pan kalau Alt key atau middle click ──
+    canvas.on('mouse:down', (opt) => {
+        const e = opt.e;
+
+        // Alt + click ATAU middle mouse button → mulai pan
+        if (e.altKey || e.button === 1) {
+            isPanning = true;
+            lastPanX = e.clientX;
+            lastPanY = e.clientY;
+            canvas.defaultCursor = 'grabbing';
+            canvas.setCursor('grabbing');
+            e.preventDefault();
+            return;
+        }
+
+        // Klik area kosong → tutup popup
+        if (!opt.target) closePopup();
+    });
+
+    // ── Mouse Move — geser viewport ──
+    canvas.on('mouse:move', (opt) => {
+        if (!isPanning) return;
+        const e = opt.e;
+        const dx = e.clientX - lastPanX;
+        const dy = e.clientY - lastPanY;
+        lastPanX = e.clientX;
+        lastPanY = e.clientY;
+
+        // Geser viewport
+        const vpt = canvas.viewportTransform;
+        vpt[4] += dx;
+        vpt[5] += dy;
+
+        canvas.requestRenderAll();
+    });
+
+    // ── Mouse Up — stop pan ──
+    canvas.on('mouse:up', () => {
+        if (isPanning) {
+            isPanning = false;
+            canvas.defaultCursor = 'default';
+            canvas.setCursor('default');
+        }
+    });
+
+    // ── Mouse Leave — stop pan ──
+    canvas.on('mouse:out', () => {
+        if (isPanning) {
+            isPanning = false;
+            canvas.defaultCursor = 'default';
+        }
+    });
+
+    // ── Scroll zoom ──
     canvas.on('mouse:wheel', (opt) => {
         opt.e.preventDefault();
         opt.e.stopPropagation();
         opt.e.deltaY > 0 ? doZoomOut() : doZoomIn();
-    });
-
-    canvas.on('mouse:down', (opt) => {
-        if (!opt.target) closePopup();
     });
 }
 
@@ -240,11 +314,21 @@ async function loadMap() {
         badge.textContent = map.name.toUpperCase();
 
         initCanvas();
-        // loadBgImage(map.image_path, () => loadUnits());
-        loadBgImage(map.image_path, async () => {
-            await loadUnits();
-            await loadTrails(); // ← tambahkan ini
+
+        // Load bg image dengan Promise
+        await new Promise((resolve) => {
+            loadBgImage(map.image_path, resolve);
         });
+
+        // Load units dulu, tunggu selesai
+        await loadUnits();
+
+        // Tunggu sebentar pastikan unitObjs sudah terisi semua
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Baru load trails
+        await loadTrails();
+
     } catch (e) {
         console.error('Gagal load peta:', e);
     }
@@ -290,20 +374,43 @@ function loadBgImage(path, callback) {
 // ── Konversi posisi ──
 function canvasToPercent(x, y) {
     const m = window.mapMeta;
+    if (!m) return {
+        px: 0.5,
+        py: 0.5
+    };
+
+    // Kompensasi viewport transform (zoom + pan)
+    const vpt = canvas.viewportTransform;
+    const scaleX = vpt[0];
+    const scaleY = vpt[3];
+    const panX = vpt[4];
+    const panY = vpt[5];
+
+    // Konversi dari canvas coordinate ke real coordinate
+    const realX = (x * scaleX + panX - m.left * scaleX) / (m.width * scaleX);
+    const realY = (y * scaleY + panY - m.top * scaleY) / (m.height * scaleY);
+
+    // Tanpa viewport (posisi object sudah dalam real coordinate)
+    const pxRaw = (x - m.left) / m.width;
+    const pyRaw = (y - m.top) / m.height;
+
     return {
-        px: Math.min(1, Math.max(0, (x - m.left) / m.width)),
-        py: Math.min(1, Math.max(0, (y - m.top) / m.height)),
+        px: Math.min(1, Math.max(0, pxRaw)),
+        py: Math.min(1, Math.max(0, pyRaw)),
     };
 }
 
 function percentToCanvas(px, py) {
     const m = window.mapMeta;
+    if (!m) return {
+        x: 0,
+        y: 0
+    };
     return {
         x: m.left + px * m.width,
-        y: m.top + py * m.height
+        y: m.top + py * m.height,
     };
 }
-
 // ── Load Units ──
 async function loadUnits() {
     try {
@@ -331,23 +438,23 @@ async function loadTrails() {
         const res = await axios.get('/api/history?limit=200');
         const history = res.data.history;
 
-        // Group by unit_id, ambil N terakhir per unit
         const grouped = {};
         history.forEach(h => {
             if (!grouped[h.unit_id]) grouped[h.unit_id] = [];
             grouped[h.unit_id].push(h);
         });
 
-        // Hapus trail lama
         clearAllTrails();
 
-        // Gambar trail baru per unit
         Object.keys(grouped).forEach(unitId => {
-            const points = grouped[unitId]
-                .slice(0, MAX_TRAIL)
-                .reverse(); // dari lama ke baru
+            const points = grouped[unitId].slice(0, MAX_TRAIL).reverse();
             const color = grouped[unitId][0].color || '#00cfff';
-            drawTrail(unitId, points, color);
+
+            // Hanya gambar trail kalau unit sudah punya titik awal
+            const unitObj = unitObjs[unitId];
+            if (unitObj && unitObj.data.has_start_point) {
+                drawTrail(unitId, points, color);
+            }
         });
 
         canvas.renderAll();
@@ -355,12 +462,12 @@ async function loadTrails() {
         console.error('Gagal load trail:', e);
     }
 }
-
 // Gambar garis trail untuk satu unit
 function drawTrail(unitId, points, color = '#00cfff') {
     if (points.length < 2) return;
-    clearTrail(unitId);
-    trailLines[unitId] = [];
+    const key = String(unitId); // ← konversi ke string
+    clearTrail(key);
+    trailLines[key] = [];
 
     for (let i = 0; i < points.length - 1; i++) {
         const fromPx = parseFloat(points[i].pos_x);
@@ -373,13 +480,13 @@ function drawTrail(unitId, points, color = '#00cfff') {
 
         const from = percentToCanvas(fromPx, fromPy);
         const to = percentToCanvas(toPx, toPy);
-        const opacity = 0.15 + (i / points.length) * 0.4;
+        const opacity = 0.3 + (i / points.length) * 0.6;
 
         const line = new fabric.Line(
             [from.x, from.y, to.x, to.y], {
                 stroke: color,
                 strokeWidth: 1.5,
-                strokeDashArray: [4, 3],
+                strokeDashArray: [10, 5],
                 opacity: opacity,
                 selectable: false,
                 evented: false,
@@ -389,13 +496,14 @@ function drawTrail(unitId, points, color = '#00cfff') {
         canvas.add(line);
         canvas.sendToBack(line);
         if (bgImage) canvas.sendToBack(bgImage);
-        trailLines[unitId].push(line);
+        trailLines[key].push(line);
     }
 }
 
 // Tambah titik trail baru saat unit dipindahkan
 function addTrailPoint(unitId, fromX, fromY, toX, toY, color = '#00cfff') {
-    if (!trailLines[unitId]) trailLines[unitId] = [];
+    const key = String(unitId); // ← konversi ke string
+    if (!trailLines[key]) trailLines[key] = [];
 
     const from = percentToCanvas(fromX, fromY);
     const to = percentToCanvas(toX, toY);
@@ -404,7 +512,7 @@ function addTrailPoint(unitId, fromX, fromY, toX, toY, color = '#00cfff') {
         [from.x, from.y, to.x, to.y], {
             stroke: color,
             strokeWidth: 1.5,
-            strokeDashArray: [4, 3],
+            strokeDashArray: [10, 5],
             opacity: 0.5,
             selectable: false,
             evented: false,
@@ -415,11 +523,10 @@ function addTrailPoint(unitId, fromX, fromY, toX, toY, color = '#00cfff') {
     canvas.sendToBack(line);
     if (bgImage) canvas.sendToBack(bgImage);
 
-    trailLines[unitId].push(line);
+    trailLines[key].push(line);
 
-    // Batasi jumlah trail per unit
-    if (trailLines[unitId].length > MAX_TRAIL) {
-        const old = trailLines[unitId].shift();
+    if (trailLines[key].length > MAX_TRAIL) {
+        const old = trailLines[key].shift();
         canvas.remove(old);
     }
 
@@ -427,14 +534,19 @@ function addTrailPoint(unitId, fromX, fromY, toX, toY, color = '#00cfff') {
 }
 
 function clearTrail(unitId) {
-    if (trailLines[unitId]) {
-        trailLines[unitId].forEach(l => canvas.remove(l));
-        trailLines[unitId] = [];
+    // Konversi ke string karena key di trailLines adalah string
+    const key = String(unitId);
+    if (trailLines[key]) {
+        trailLines[key].forEach(l => canvas.remove(l));
+        trailLines[key] = [];
+        delete trailLines[key];
     }
+    canvas.renderAll();
 }
 
 function clearAllTrails() {
-    Object.keys(trailLines).forEach(id => clearTrail(id));
+    Object.keys(trailLines).forEach(key => clearTrail(key));
+    trailLines = {};
 }
 
 // Toggle trail on/off
@@ -523,12 +635,13 @@ function addUnitToCanvas(unit) {
                     pos_x: unit.pos_x,
                     pos_y: unit.pos_y,
                     updated_at: unit.updated_at,
+                    has_start_point: parseInt(unit.has_start_point) || 0,
                 }
             });
 
             // Simpan posisi sebelum drag dimulai
-            let dragStartX = null;
-            let dragStartY = null;
+            // let dragStartX = null;
+            // let dragStartY = null;
 
             group.on('mousedown', (opt) => {
                 // Simpan posisi awal saat mulai drag
@@ -542,36 +655,51 @@ function addUnitToCanvas(unit) {
                 }
             });
 
-            // Drag: emit realtime
+            let dragStartX = null;
+            let dragStartY = null;
+
+            group.on('mousedown', (opt) => {
+                dragStartX = group.left;
+                dragStartY = group.top;
+                if (opt.e.detail === 2) {
+                    opt.e.stopPropagation();
+                    showPopup(group, opt.e);
+                }
+            });
+
+            // Moving — realtime smooth seperti sebelumnya
             group.on('moving', () => {
                 const {
                     px,
                     py
                 } = canvasToPercent(group.left, group.top);
-
                 if (socket && socket.connected) {
                     socket.emit('unit_moved', {
                         unit_id: unit.id,
                         name: unit.name,
                         type_name: unit.type_name,
+                        color: color,
                         pos_x: px,
                         pos_y: py,
                         moved_by: UNAME,
                         timestamp: new Date().toISOString(),
+                        is_final: false,
+                        has_start_point: 0,
+                        prev_x: null,
+                        prev_y: null,
                     });
                 }
             });
 
-            // Drag selesai: simpan ke DB + gambar trail
+            // Modified — drag selesai, kirim data lengkap
             group.on('modified', () => {
                 const {
                     px: newPx,
                     py: newPy
                 } = canvasToPercent(group.left, group.top);
 
-                // Gunakan posisi awal dari mousedown, bukan dari data
-                let prevPx = group.data.pos_x;
-                let prevPy = group.data.pos_y;
+                let prevPx = parseFloat(group.data.pos_x);
+                let prevPy = parseFloat(group.data.pos_y);
 
                 if (dragStartX !== null && dragStartY !== null) {
                     const converted = canvasToPercent(dragStartX, dragStartY);
@@ -579,23 +707,39 @@ function addUnitToCanvas(unit) {
                     prevPy = converted.py;
                 }
 
-                // Jangan gambar trail kalau posisi sama (klik tanpa drag)
                 const dist = Math.abs(newPx - prevPx) + Math.abs(newPy - prevPy);
-                if (dist > 0.001) {
+
+                // Gambar trail di canvas pengirim
+                if (dist > 0.001 && group.data.has_start_point) {
                     addTrailPoint(unit.id, prevPx, prevPy, newPx, newPy, color);
                 }
 
-                // Update data
                 group.data.pos_x = newPx;
                 group.data.pos_y = newPy;
                 group.data.updated_at = new Date().toISOString();
-
-                // Reset drag start
                 dragStartX = null;
                 dragStartY = null;
 
                 savePosition(unit.id, newPx, newPy);
                 addHistoryEntry(unit.name, unit.type_name, newPx, newPy);
+
+                // Emit FINAL dengan data lengkap
+                if (socket && socket.connected) {
+                    socket.emit('unit_moved', {
+                        unit_id: unit.id,
+                        name: unit.name,
+                        type_name: unit.type_name,
+                        color: color,
+                        pos_x: newPx,
+                        pos_y: newPy,
+                        prev_x: prevPx,
+                        prev_y: prevPy,
+                        moved_by: UNAME,
+                        timestamp: new Date().toISOString(),
+                        is_final: true, // ← tandai ini emit final
+                        has_start_point: parseInt(group.data.has_start_point) || 0,
+                    });
+                }
             });
 
             canvas.add(group);
@@ -626,79 +770,138 @@ async function savePosition(unitId, px, py) {
 // Terima pergerakan unit dari user lain
 function setupSocketListeners() {
 
-    // Unit bergerak (realtime dari user lain)
     socket.on('unit_moved', (data) => {
         const obj = unitObjs[data.unit_id];
         if (!obj) return;
 
-        const prevX = parseFloat(obj.data.pos_x);
-        const prevY = parseFloat(obj.data.pos_y);
-        const color = obj.data.color || '#00cfff';
+        const pos = percentToCanvas(
+            parseFloat(data.pos_x),
+            parseFloat(data.pos_y)
+        );
 
-        const pos = percentToCanvas(parseFloat(data.pos_x), parseFloat(data.pos_y));
-
-        // Animasi smooth
+        // Selalu animasi pergerakan
         obj.animate({
             left: pos.x,
             top: pos.y
         }, {
-            duration: 200,
+            duration: 100,
             onChange: canvas.renderAll.bind(canvas),
             easing: fabric.util.ease.easeOutQuad,
+            onComplete: () => {
+                obj.setCoords();
+            }
         });
 
-        // Gambar trail realtime
-        addTrailPoint(data.unit_id, prevX, prevY, data.pos_x, data.pos_y, color);
+        // Hanya proses trail saat emit FINAL
+        if (data.is_final === true) {
+            obj.data.pos_x = data.pos_x;
+            obj.data.pos_y = data.pos_y;
+            obj.data.updated_at = data.timestamp;
 
-        obj.data.pos_x = data.pos_x;
-        obj.data.pos_y = data.pos_y;
-        obj.data.updated_at = data.timestamp;
+            // Gambar trail di penerima
+            const hasStart = parseInt(data.has_start_point) || 0;
+            if (hasStart && data.prev_x !== null && data.prev_x !== undefined) {
+                const prevX = parseFloat(data.prev_x);
+                const prevY = parseFloat(data.prev_y);
+                const newX = parseFloat(data.pos_x);
+                const newY = parseFloat(data.pos_y);
+                const dist = Math.abs(newX - prevX) + Math.abs(newY - prevY);
 
-        addHistoryEntry(data.name, data.type_name, data.pos_x, data.pos_y, data.moved_by);
-
-        toastr.info(
-            `${data.name} dipindahkan oleh ${data.moved_by}`,
-            '', {
-                timeOut: 2000,
-                positionClass: 'toast-bottom-left'
+                if (dist > 0.001) {
+                    const trailColor = data.color || obj.data.color || '#00cfff';
+                    addTrailPoint(data.unit_id, prevX, prevY, newX, newY, trailColor);
+                }
             }
-        );
+
+            addHistoryEntry(
+                data.name, data.type_name,
+                data.pos_x, data.pos_y,
+                data.moved_by
+            );
+        }
     });
-    // Unit baru ditambah oleh user lain
+
+    // ── Unit dihapus (dari user lain) ──
+    socket.on('unit_deleted', (data) => {
+        console.log('📡 Received unit_deleted:', data);
+        // Cek apakah unit masih ada di canvas
+        // (kalau pengirim, sudah dihapus duluan jadi skip)
+        const obj = unitObjs[data.unit_id];
+        console.log('🎯 Object found:', obj ? 'YES' : 'NO');
+        if (!obj) return;
+
+        // Hapus trail
+        clearTrail(data.unit_id);
+
+        // Hapus dari canvas
+        canvas.remove(obj);
+        delete unitObjs[data.unit_id];
+        canvas.renderAll();
+
+        // Update sidebar & stats
+        const remaining = Object.values(unitObjs).map(o => o.data);
+        updateSidebarList(remaining);
+        updateStats(remaining);
+        updateFilterChips(remaining);
+
+        toastr.warning('Sebuah unit telah dihapus.', '', {
+            timeOut: 2500
+        });
+    });
+
+    // ── Unit diedit (dari user lain) ──
+    socket.on('unit_edited', (data) => {
+        const obj = unitObjs[data.unit_id];
+        if (!obj) return;
+
+        // Update data
+        obj.data.name = data.name;
+
+        // Update label text di canvas
+        const items = obj.getObjects();
+        items.forEach(item => {
+            // Label ada di posisi top > 0 (bukan icon/circle)
+            if (item.type === 'text' && item.top > 0) {
+                item.set('text', data.name);
+            }
+        });
+
+        // Re-render canvas
+        obj.setCoords();
+        canvas.renderAll();
+
+        // Update sidebar
+        const allUnits = Object.values(unitObjs).map(o => o.data);
+        updateSidebarList(allUnits);
+
+        toastr.info(`Unit diupdate: ${data.name}`, '', {
+            timeOut: 2500
+        });
+    });
+
+    // ── Unit baru ditambah (dari user lain) ──
     socket.on('unit_added', (data) => {
-        loadUnits(); // reload semua unit
+        loadUnits().then(() => loadTrails());
         toastr.success(`Unit baru ditambahkan: ${data.name}`);
     });
 
-    // Unit dihapus oleh user lain
-    socket.on('unit_deleted', (data) => {
-        const obj = unitObjs[data.unit_id];
-        if (obj) {
-            canvas.remove(obj);
-            delete unitObjs[data.unit_id];
-            canvas.renderAll();
-        }
-        toastr.warning('Sebuah unit telah dihapus.');
-        loadUnits();
-    });
+    // Titik awal di-set oleh user lain
+    socket.on('start_point_set', (data) => {
+        // Hapus trail unit tersebut di canvas
+        clearTrail(String(data.unit_id));
 
-    // Unit diedit oleh user lain
-    socket.on('unit_edited', (data) => {
+        // Update data object
         const obj = unitObjs[data.unit_id];
-        if (obj) {
-            obj.data.name = data.name;
-            // Update label text
-            const items = obj.getObjects();
-            items.forEach(item => {
-                if (item.type === 'text' && item.top > 0) {
-                    item.set('text', data.name);
-                }
-            });
-            canvas.renderAll();
-        }
+        if (obj) obj.data.has_start_point = 1;
+
+        toastr.info(
+            `Titik awal ${data.name} telah di-set`,
+            '', {
+                timeOut: 2500
+            }
+        );
     });
 }
-
 // ── Emit unit_added ──
 async function openAddUnitModal() {
     const res = await axios.get('/api/unit-types');
@@ -725,24 +928,24 @@ async function openAddUnitModal() {
         background: '#0d1220',
         color: '#c0d8f0',
         html: `
-      <div style="text-align:left;margin-bottom:12px;">
+    <div style="text-align:left;margin-bottom:12px;">
         <label style="font-size:11px;color:#3a5070;letter-spacing:1px;
                       display:block;margin-bottom:6px;">NAMA UNIT *</label>
         <input id="swalUnitName" type="text" placeholder="cth: KRI Diponegoro"
-          style="width:100%;background:#0a1220;border:0.5px solid #1e2d4a;
-                 border-radius:6px;padding:9px 14px;font-size:12px;
-                 color:#c0d8f0;outline:none;">
-      </div>
-      <div style="text-align:left;">
+        style="width:100%;background:#0a1220;border:0.5px solid #1e2d4a;
+                border-radius:6px;padding:9px 14px;font-size:12px;
+                color:#c0d8f0;outline:none;">
+    </div>
+    <div style="text-align:left;">
         <label style="font-size:11px;color:#3a5070;letter-spacing:1px;
                       display:block;margin-bottom:6px;">JENIS UNSUR *</label>
         <select id="swalUnitType"
-          style="width:100%;background:#0a1220;border:0.5px solid #1e2d4a;
-                 border-radius:6px;padding:9px 14px;font-size:12px;
-                 color:#c0d8f0;outline:none;">
-          ${options}
+        style="width:100%;background:#0a1220;border:0.5px solid #1e2d4a;
+                border-radius:6px;padding:9px 14px;font-size:12px;
+                color:#c0d8f0;outline:none;">
+        ${options}
         </select>
-      </div>`,
+    </div>`,
         showCancelButton: true,
         confirmButtonText: 'Tambah Unit',
         cancelButtonText: 'Batal',
@@ -795,6 +998,8 @@ async function openAddUnitModal() {
     });
 }
 
+
+
 // ── Edit Unit ──
 function editUnit(id, currentName) {
     closePopup();
@@ -815,26 +1020,48 @@ function editUnit(id, currentName) {
     }).then(async (result) => {
         if (result.isConfirmed && result.value.trim()) {
             try {
+                const newName = result.value.trim();
                 await axios.post('/api/units/update/' + id, {
-                    name: result.value.trim()
+                    name: newName
                 });
-                toastr.success('Unit berhasil diupdate!');
-                loadUnits();
 
-                // Emit ke semua user
+                // Update langsung di canvas pengirim
+                const obj = unitObjs[id];
+                if (obj) {
+                    obj.data.name = newName;
+
+                    // Update label text
+                    const items = obj.getObjects();
+                    items.forEach(item => {
+                        if (item.type === 'text' && item.top > 0) {
+                            item.set('text', newName);
+                        }
+                    });
+
+                    obj.setCoords();
+                    canvas.renderAll();
+                }
+
+                // Update sidebar
+                const allUnits = Object.values(unitObjs).map(o => o.data);
+                updateSidebarList(allUnits);
+
+                toastr.success('Unit berhasil diupdate!');
+
+                // Emit ke semua user lain
                 if (socket && socket.connected) {
                     socket.emit('unit_edited', {
                         unit_id: id,
-                        name: result.value.trim()
+                        name: newName
                     });
                 }
+
             } catch (e) {
                 toastr.error('Gagal update unit.');
             }
         }
     });
 }
-
 // ── Hapus Unit ──
 function deleteUnit(id, name) {
     closePopup();
@@ -853,15 +1080,31 @@ function deleteUnit(id, name) {
         if (result.isConfirmed) {
             try {
                 await axios.post('/api/units/delete/' + id);
-                toastr.success('Unit berhasil dihapus!');
-                loadUnits();
 
-                // Emit ke semua user
+                // Hapus langsung di canvas pengirim
+                const obj = unitObjs[id];
+                if (obj) {
+                    clearTrail(id);
+                    canvas.remove(obj);
+                    delete unitObjs[id];
+                    canvas.renderAll();
+                }
+
+                // Update sidebar & stats
+                const remaining = Object.values(unitObjs).map(o => o.data);
+                updateSidebarList(remaining);
+                updateStats(remaining);
+                updateFilterChips(remaining);
+
+                toastr.success('Unit berhasil dihapus!');
+
+                // Emit ke semua user lain
                 if (socket && socket.connected) {
                     socket.emit('unit_deleted', {
                         unit_id: id
                     });
                 }
+
             } catch (e) {
                 toastr.error('Gagal hapus unit.');
             }
@@ -887,6 +1130,12 @@ function showPopup(group, e) {
         data.updated_at ?
         new Date(data.updated_at).toLocaleTimeString('id-ID') :
         '—';
+    // Tampilkan status titik awal
+    const startLabel = document.getElementById('popupStartLabel');
+    if (startLabel) {
+        startLabel.textContent = data.has_start_point ? '✓ Titik awal sudah di-set' : 'Belum ada titik awal';
+        startLabel.style.color = data.has_start_point ? '#22c55e' : '#3a5070';
+    }
 
     const wrapRect = wrap.getBoundingClientRect();
     let px = e.clientX - wrapRect.left + 12;
@@ -903,12 +1152,60 @@ function showPopup(group, e) {
             () => editUnit(data.unit_id, data.name);
         document.getElementById('popupBtnDel').onclick =
             () => deleteUnit(data.unit_id, data.name);
+        document.getElementById('popupBtnStart').onclick =
+            () => setStartPoint(data.unit_id, data.name, group);
     }
 }
 
 function closePopup() {
     document.getElementById('unitPopup').style.display = 'none';
     activePopupId = null;
+}
+
+// ── Set Titik Awal ──
+function setStartPoint(id, name, group) {
+    closePopup();
+    Swal.fire({
+        title: 'Set Titik Awal?',
+        html: `Posisi <strong style="color:#00cfff">${name}</strong> 
+                saat ini akan dijadikan titik awal.<br>
+                <span style="color:#ff6070;font-size:11px;">
+                  ⚠ Histori trail sebelumnya akan dihapus.
+                </span>`,
+        icon: 'question',
+        background: '#0d1220',
+        color: '#c0d8f0',
+        showCancelButton: true,
+        confirmButtonColor: '#22c55e',
+        cancelButtonColor: '#1e2d4a',
+        confirmButtonText: '<i class="fa fa-flag"></i> Set Titik Awal',
+        cancelButtonText: 'Batal',
+    }).then(async (result) => {
+        if (result.isConfirmed) {
+            try {
+                await axios.post('/api/units/set-start/' + id);
+
+                // Hapus trail lama di canvas
+                clearTrail(String(id));
+
+                // Update data group
+                group.data.has_start_point = 1;
+
+                toastr.success('Titik awal berhasil disimpan!');
+
+                // Emit ke user lain
+                if (socket && socket.connected) {
+                    socket.emit('start_point_set', {
+                        unit_id: id,
+                        name: name
+                    });
+                }
+
+            } catch (e) {
+                toastr.error('Gagal set titik awal.');
+            }
+        }
+    });
 }
 
 // ── History Panel ──
@@ -1012,31 +1309,38 @@ function focusUnit(id) {
 
 // ── Zoom ──
 function doZoomIn() {
-    zoomLevel = Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP);
+    zoomLevel = Math.min(MAX_ZOOM, parseFloat((zoomLevel + ZOOM_STEP).toFixed(2)));
     applyZoom();
 }
 
 function doZoomOut() {
-    zoomLevel = Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP);
+    zoomLevel = Math.max(MIN_ZOOM, parseFloat((zoomLevel - ZOOM_STEP).toFixed(2)));
     applyZoom();
 }
 
 function applyZoom() {
-    const c = canvas.getCenter();
-    canvas.zoomToPoint(new fabric.Point(c.left, c.top), zoomLevel);
+    const center = canvas.getCenter();
+    canvas.zoomToPoint(
+        new fabric.Point(center.left, center.top),
+        zoomLevel
+    );
     updateZoomLabel();
+    canvas.requestRenderAll();
 }
 
 function updateZoomLabel() {
-    document.getElementById('zoomLevel').textContent = Math.round(zoomLevel * 100) + '%';
+    document.getElementById('zoomLevel').textContent =
+        Math.round(zoomLevel * 100) + '%';
 }
 
 document.getElementById('zoomIn').addEventListener('click', doZoomIn);
 document.getElementById('zoomOut').addEventListener('click', doZoomOut);
 document.getElementById('zoomReset').addEventListener('click', () => {
     zoomLevel = 1;
+    // Reset zoom DAN pan
     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
     updateZoomLabel();
+    canvas.requestRenderAll();
 });
 
 // ── Add Unit button ──

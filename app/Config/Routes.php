@@ -63,6 +63,7 @@ $routes->group('api', ['filter' => 'auth'], function($routes) {
     // History
     $routes->get('units/history',           'UnitController::getHistory');
     $routes->get('history', 'HistoryController::getHistory');
+    $routes->post('units/set-start/(:num)', 'UnitController::setStartPoint/$1');
 });
 
 // History (semua role yang login)
